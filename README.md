@@ -14,3 +14,5 @@ Every 50ms, the frames are picked out from the queue and passed in to the led dr
 If the queue length gets low , the refresh rate is lowered to give a chance to the artnet frames to refill the queue.
 
 The configuration of the device is set on a web page : wifi config, number of leds, color scheme, artnet first universe number ..
+
+*Note: Don't forget to enable PSRAM (menu Tools/PSRAM/Enable in Arduino IDE)
