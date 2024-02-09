@@ -5,7 +5,7 @@
 */
 
 #define SCRIPT_VERSION "script version 7"
-//#define DEBUG
+#define DEBUG
 
 #include "Arduino.h"
 #include "WiFi.h"
@@ -20,49 +20,54 @@
 
 #include "home_template.h"
 
-#define FRAME_BUFFER_SIZE 10
-#define FRAME_BUFFER_LOW_COUNT 4
 
+//----- frame buffer stuff
+int frame_buffer_size = 20;
+int frame_buffer_low_count = 4;
+uint8_t *frameBuffer;
 int lastReceivedIndex = -1;    //-- emplacement de la prochaine frame reçue
 int nextToShowIndex = -1;  //-- emplacement de la prochaine frame à afficher
 int shownFrames = 0;
+int totalLost = 0;
 
-const byte dataPin = 5;  //-- 5 sur l'esp32c3 GPIO5 = A3 = D3
-
-// int pins[16]={2,4,5,12,13,14,15,17,16,19,21,22,23,25,26};
-int pins[1]={dataPin};
 
 //-- leds stuff
+const byte dataPin = 5;  //-- 5 sur l'esp32c3 GPIO5 = A3 = D3
+// int pins[16]={2,4,5,12,13,14,15,17,16,19,21,22,23,25,26};
+int pins[1]={dataPin};
 int numLeds = 50;
 uint8_t *leds;
 I2SClocklessLedDriveresp32S3 ledCtrl;
 TaskHandle_t showLedsTaskHandle = NULL;
+int nextDelay = 300;
+unsigned long lastResume = 0;
+
 
 
 //-- ConfigAssist stuff
 #include "config_assist.h"
 WebServer server(80);
 ConfigAssist conf("/config.ini",VARIABLES_DEF_JSON);
+bool isConfigReady = false;
+
 
 //-- Artnet stuff
 artnetESP32V2 artnet=artnetESP32V2();
 char strbuf[200];
-uint8_t *frameBuffer;
 int frameSize;
+
 
 // ----------------
 // Reception des "frames"
 // On les accumule dans un buffer ; si l'affichage a trop tardé, on écrase la prochaine frame à afficher.
-
 void incBufIndex(int *index) {
   (*index)++;
-  if (*index == FRAME_BUFFER_SIZE) {
+  if (*index == frame_buffer_size) {
     *index = 0;
     }
 }
 
 
-int totalLost = 0;
 void pushInboundFrame(subArtnet *subartnet){
   if (lastReceivedIndex == -1) {
     lastReceivedIndex = 0;
@@ -95,7 +100,7 @@ int bufferLen() {
     len = 0;
   } else {
     len = lastReceivedIndex - nextToShowIndex;
-    if (len <0) len += FRAME_BUFFER_SIZE;
+    if (len <0) len += frame_buffer_size;
     len++;
   }
   return len; 
@@ -129,9 +134,7 @@ void showNextFrame(void *arg) {
 }
 
 
-bool isConfigReady = false;
 void setup() {
-
   Serial.begin(2000000);
   Serial.println(SCRIPT_VERSION);     
 
@@ -152,8 +155,6 @@ void setup() {
 
 }
 
-int nextDelay = 50;
-unsigned long lastResume = 0;
 void loop() {
   unsigned long now = millis();
   if(now - lastResume >= nextDelay) {
@@ -161,7 +162,7 @@ void loop() {
     if (isConfigReady) {
       lastResume = now;
       nextDelay = 50; //-- par défaut, 50ms (20 frames/s)
-      if (bufferLen() < FRAME_BUFFER_LOW_COUNT) nextDelay = 100; // en cas de retard, on ralentit le rythme d'affichege 
+      if (bufferLen() < frame_buffer_low_count) nextDelay = 100; // en cas de retard, on ralentit le rythme d'affichege 
       vTaskResume(showLedsTaskHandle);
     }
     server.handleClient();
@@ -200,6 +201,8 @@ void initLeds() {
   //ledCtrl.setBrightness(20);
 
   //--- create display task
+  lastResume = millis();
+  nextDelay = conf["start_delay"].toInt();
   xTaskCreate(showNextFrame, "Show next frame task", 4096, NULL, 10, &showLedsTaskHandle);
 }
 
@@ -209,8 +212,10 @@ void initArtnet() {
   * NUM_LEDS_PER_STRIP * NUMSTRIPS is the total number of leds 
   * NUM_LEDS_PER_STRIP * NUMSTRIPS * NB_CHANNEL_PER_LED is the total number of channels needed here 3 channel per led (R,G,B)
   */ 
+  frame_buffer_size = conf["frame_buf_nb"].toInt();
+  frame_buffer_low_count = conf["frame_buf_low"].toInt();
 
-  frameBuffer = (uint8_t *) malloc(FRAME_BUFFER_SIZE * frameSize);
+  frameBuffer = (uint8_t *) malloc(frame_buffer_size * frameSize);
 
   subArtnet* sub =  artnet.addSubArtnet(conf["start_universe"].toInt() ,numLeds * 3, 170 * 3 ,&pushInboundFrame);
     

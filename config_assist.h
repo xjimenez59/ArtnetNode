@@ -35,4 +35,15 @@ Artnet:
   - start_universe:
       label: Numero du premier univers
       default: 0
+  - frame_buf_nb:
+      label: Nombre de frames dans la file tampon
+      range: 5, 30, 1
+      default: 10
+  - frame_buf_low:
+      label: Seuil de niveau bas de la file tampon
+      range: 3, 15,1
+  - start_delay:
+      label: Délai (ms) initial avant de démarrer l'affichage
+      range: 100, 1000, 50
+      default: 300
 )~"; 
