@@ -15,8 +15,8 @@
 #include "artnetESP32V2.h"
 
 #include "customI2SClockLessLedDriverEsp32s3.h"
-#define FASTLED_INTERNAL
-#include "FastLED.h"
+//#define FASTLED_INTERNAL
+//#include "FastLED.h"
 
 #include "home_template.h"
 
