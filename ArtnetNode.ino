@@ -1,22 +1,24 @@
 
 /*
-  v5 du script : introduit un buffer de "n" frames, pour compenser les soubresauts de transmission UDP. 
+  v7 du script : introduit un buffer de "n" frames, pour compenser les soubresauts de transmission UDP. 
   Pas d'utilisation des interruptions pour cadencer l'affichage des frames ..
 */
 
 #define SCRIPT_VERSION "script version 7"
-#define DEBUG
+//#define DEBUG
+
 
 #include "Arduino.h"
 #include "WiFi.h"
-#include "ConfigAssist.h"
-#include <ConfigAssistHelper.h>  // Config assist helper class
+#include <ESP32Ping.h>
+#include "customConfigAssist.h"
+#include "customAssistHelper.h"  // Config assist helper class
 
 #include "artnetESP32V2.h"
 
-#include "customI2SClockLessLedDriverEsp32s3.h"
-//#define FASTLED_INTERNAL
-//#include "FastLED.h"
+//#include "customI2SClockLessLedDriverEsp32s3.h"
+#define FASTLED_INTERNAL
+#include "FastLED.h"
 
 #include "home_template.h"
 
@@ -29,6 +31,7 @@ int lastReceivedIndex = -1;    //-- emplacement de la prochaine frame reçue
 int nextToShowIndex = -1;  //-- emplacement de la prochaine frame à afficher
 int shownFrames = 0;
 int totalLost = 0;
+int totalEmptyBuffer = 0;
 
 
 //-- leds stuff
@@ -37,7 +40,8 @@ const byte dataPin = 5;  //-- 5 sur l'esp32c3 GPIO5 = A3 = D3
 int pins[1]={dataPin};
 int numLeds = 50;
 uint8_t *leds;
-I2SClocklessLedDriveresp32S3 ledCtrl;
+//I2SClocklessLedDriveresp32S3 ledCtrl;
+CLEDController* ledCtrl;
 TaskHandle_t showLedsTaskHandle = NULL;
 int nextDelay = 300;
 unsigned long lastResume = 0;
@@ -69,6 +73,7 @@ void incBufIndex(int *index) {
 
 
 void pushInboundFrame(subArtnet *subartnet){
+
   if (lastReceivedIndex == -1) {
     lastReceivedIndex = 0;
   } else {
@@ -85,10 +90,12 @@ void pushInboundFrame(subArtnet *subartnet){
     nextToShowIndex = lastReceivedIndex;  // le buffer n'est plus vide
   }
   #ifdef DEBUG
+  Serial.print("+");
   if (lost) {
     totalLost++;
-    sprintf(strbuf,"buflen: %u [%u,%u] shown: %d lost: %d (%2d.1%%)]",bufferLen(),nextToShowIndex,lastReceivedIndex,shownFrames,totalLost,totalLost*100/shownFrames);
+    sprintf(strbuf,"buflen: %u [%u,%u] shown: %d lost: %d (%2d.1%%) empty buf: %d",bufferLen(),nextToShowIndex,lastReceivedIndex,shownFrames,totalLost,(shownFrames == 0) ? 0.0 : totalLost*100/shownFrames,totalEmptyBuffer);
     Serial.println(strbuf);
+
   }
   #endif
 }
@@ -114,22 +121,29 @@ void showNextFrame(void *arg) {
     
     vTaskSuspend(NULL);
       if (nextToShowIndex != -1) {
-        memmove(leds, &frameBuffer[nextToShowIndex * frameSize], frameSize);
-        ledCtrl.show();
+        //memmove(leds, &frameBuffer[nextToShowIndex * frameSize], frameSize);
+        //ledCtrl.show();
+
+        ledCtrl->setLeds((CRGB *) &frameBuffer[nextToShowIndex * frameSize],numLeds);
+        FastLED.show();
         
         #ifdef DEBUG
           //sprintf(strbuf,"show frame %u",nextToShowIndex);
           //Serial.println(strbuf);
-          Serial.print(".");
+          Serial.print("-");
         #endif
       
         if (nextToShowIndex == lastReceivedIndex) {
           nextToShowIndex = -1;   //on vient d'afficher le dernier element du buffer.
+          digitalWrite(LED_BUILTIN, LOW);  //-- buffer vide : on allume la led
+          totalEmptyBuffer++;
         } else {
           incBufIndex(&nextToShowIndex);
+          digitalWrite(LED_BUILTIN, HIGH);
+
         }
         shownFrames++;
-      }    
+      } 
   }
 }
 
@@ -137,24 +151,31 @@ void showNextFrame(void *arg) {
 void setup() {
   Serial.begin(2000000);
   Serial.println(SCRIPT_VERSION);     
-
+  pinMode(LED_BUILTIN,OUTPUT);
+  
   initConfig();
+
   if (isConfigReady) {
+    delay(1000);
+    numLeds = conf["leds_nb"].toInt();
+    frameSize = numLeds * sizeof(uint8_t) * 3;  // leds RGB donc 3  octets par led
     initLeds();
     initArtnet();
+    ledOff();
   }
 
-
+  
+  
+  
   sprintf(strbuf, "Chip model: %s, %d MHz, %d coeurs",ESP.getChipModel(),ESP.getCpuFreqMHz(),ESP.getChipCores());
   Serial.println(strbuf);
   sprintf(strbuf, "Free heap: %d / %d %d max block",ESP.getFreeHeap(),ESP.getHeapSize(),ESP.getMaxAllocHeap());
   Serial.println(strbuf);
   sprintf(strbuf,"Free PSRAM: %d / %d %d max block",ESP.getFreePsram(),ESP.getPsramSize(),ESP.getMaxAllocPsram());
   Serial.println(strbuf);
-
-
 }
 
+int nextHandleClient= millis() + 1000;
 void loop() {
   unsigned long now = millis();
   if(now - lastResume >= nextDelay) {
@@ -164,8 +185,13 @@ void loop() {
       nextDelay = 50; //-- par défaut, 50ms (20 frames/s)
       if (bufferLen() < frame_buffer_low_count) nextDelay = 100; // en cas de retard, on ralentit le rythme d'affichege 
       vTaskResume(showLedsTaskHandle);
+    } else {
+      blink(10,200);
     }
-    server.handleClient();
+    if(now > nextHandleClient) {
+      server.handleClient();
+      nextHandleClient = now + 250;
+    }
   }
   
   yield(); 
@@ -173,7 +199,7 @@ void loop() {
 }
 
 void handleRoot() {
-  sendHomePage(&server,WiFi.getHostname(),shownFrames,totalLost);
+  sendHomePage(&server,WiFi.getHostname(),shownFrames,totalLost,totalEmptyBuffer);
 }
 
 void initConfig() {
@@ -185,6 +211,16 @@ void initConfig() {
   bool bConn = confHelper.connectToNetwork();
   conf.setup(server, !bConn); 
   if(bConn) {
+
+    //-- cxn ok, on attend de pouvoir "pinguer" la gateway ..
+    IPAddress gwip = WiFi.gatewayIP();
+    int ping_count = 5;
+    while (Ping.ping(gwip) == false && ping_count-- > 0) {
+      Serial.println("echec ping");
+      blink(3,100);
+      delay(250);
+    };
+
     isConfigReady = true;
     server.on("/", handleRoot);
   }
@@ -193,17 +229,15 @@ void initConfig() {
 }
 
 void initLeds() {
-  numLeds = conf["leds_nb"].toInt();
-  frameSize = numLeds * sizeof(uint8_t) * 3;  // leds RGB donc 3  octets par led
   leds = (uint8_t *) malloc(frameSize);
-
-  ledCtrl.initled(leds,pins,1,numLeds,(enum colorarrangment) conf["leds_color_order"].toInt());   // un seul "strip" , donc toutes les leds sur ce strip.
+  //ledCtrl.initled(leds,pins,1,numLeds,(enum colorarrangment) conf["leds_color_order"].toInt());   // un seul "strip" , donc toutes les leds sur ce strip.
+  ledCtrl = &FastLED.addLeds<WS2812, dataPin, RGB>((CRGB *) leds, numLeds);
   //ledCtrl.setBrightness(20);
-
   //--- create display task
   lastResume = millis();
   nextDelay = conf["start_delay"].toInt();
-  xTaskCreate(showNextFrame, "Show next frame task", 4096, NULL, 10, &showLedsTaskHandle);
+  xTaskCreatePinnedToCore(showNextFrame, "Show next frame task", 4096, NULL, 10, &showLedsTaskHandle,0);
+  //xTaskCreate(showNextFrame, "Show next frame task", 4096, NULL, 10, &showLedsTaskHandle);
 }
 
 void initArtnet() {
@@ -217,13 +251,30 @@ void initArtnet() {
 
   frameBuffer = (uint8_t *) malloc(frame_buffer_size * frameSize);
 
-  subArtnet* sub =  artnet.addSubArtnet(conf["start_universe"].toInt() ,numLeds * 3, 170 * 3 ,&pushInboundFrame);
+  subArtnet* sub =  artnet.addSubArtnet(conf["start_universe"].toInt() ,frameSize, 170 * sizeof(uint8_t) * 3 ,&pushInboundFrame);
     
   if(artnet.listen(6454)) {
       Serial.print("artnet Listening on IP: ");
       Serial.println(WiFi.localIP());
   }
 
+}
+
+void ledOn() {
+  digitalWrite(LED_BUILTIN,LOW);
+}
+void ledOff(){
+  digitalWrite(LED_BUILTIN,HIGH);
+}
+void blink(int nb, int ms) {
+  //int old_level = digitalRead(LED_BUILTIN);
+  for (int i=0; i<nb; i++){
+    digitalWrite(LED_BUILTIN,LOW);
+    vTaskDelay(ms/2);
+    digitalWrite(LED_BUILTIN,HIGH);
+    vTaskDelay(ms/2);
+  }
+  digitalWrite(LED_BUILTIN,HIGH);
 }
 
 
